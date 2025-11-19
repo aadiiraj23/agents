@@ -217,6 +217,20 @@ class AgentActivity(RecognitionHooks):
                 "for more responsive interruption handling."
             )
 
+        # filler-word filter settings (configurable via AgentSession)
+        # ignored_fillers: sequence of lowercased filler tokens to ignore when agent is speaking
+        # filler_confidence_threshold: minimum ASR confidence to consider speech as valid while agent is speaking
+        opts = getattr(self._session, "_opts", None)
+        if opts is not None:
+            self._ignored_fillers = list(opts.ignored_fillers) if opts.ignored_fillers is not None else ["uh", "umm", "hmm", "haan"]
+            self._filler_confidence_threshold = float(opts.filler_confidence_threshold)
+        else:
+            self._ignored_fillers = ["uh", "umm", "hmm", "haan"]
+            self._filler_confidence_threshold = 0.5
+
+        # normalize to lowercase set for fast checks
+        self._ignored_fillers_set = {t.lower() for t in self._ignored_fillers}
+
         self._mcp_tools: list[mcp.MCPTool] = []
 
         self._on_enter_task: asyncio.Task | None = None
@@ -1234,16 +1248,29 @@ class AgentActivity(RecognitionHooks):
             # skip stt transcription if user_transcription is enabled on the realtime model
             return
 
+        transcript = ev.alternatives[0].text
+        confidence = ev.alternatives[0].confidence
+
+        # if agent currently speaking, apply filler filtering: ignore if transcript only consists
+        # of filler tokens (configurable) and confidence below threshold
+        if self._current_speech is not None and not self._current_speech.interrupted:
+            if transcript and self._is_filler_only(transcript, confidence):
+                logger.debug("ignored filler interim transcript while agent speaking", extra={"transcript": transcript, "confidence": confidence})
+                # log a false interruption for debugging
+                self._session.emit("agent_false_interruption", AgentFalseInterruptionEvent(resumed=False))
+                return
+
+        # forward as usual
         self._session._user_input_transcribed(
             UserInputTranscribedEvent(
                 language=ev.alternatives[0].language,
-                transcript=ev.alternatives[0].text,
+                transcript=transcript,
                 is_final=False,
                 speaker_id=ev.alternatives[0].speaker_id,
             ),
         )
 
-        if ev.alternatives[0].text:
+        if transcript:
             self._interrupt_by_audio_activity()
 
             if (
@@ -1259,10 +1286,30 @@ class AgentActivity(RecognitionHooks):
             # skip stt transcription if user_transcription is enabled on the realtime model
             return
 
+        transcript = ev.alternatives[0].text
+        confidence = ev.alternatives[0].confidence
+
+        # when agent is speaking, filter filler-only transcripts
+        if self._current_speech is not None and not self._current_speech.interrupted:
+            if transcript and self._is_filler_only(transcript, confidence):
+                logger.info("ignored filler final transcript while agent speaking", extra={"transcript": transcript, "confidence": confidence})
+                self._session.emit("agent_false_interruption", AgentFalseInterruptionEvent(resumed=False))
+                # still mark final transcript received for flushing logic in AudioRecognition
+                self._session._user_input_transcribed(
+                    UserInputTranscribedEvent(
+                        language=ev.alternatives[0].language,
+                        transcript="",
+                        is_final=True,
+                        speaker_id=ev.alternatives[0].speaker_id,
+                    ),
+                )
+                return
+
+        # forward as usual
         self._session._user_input_transcribed(
             UserInputTranscribedEvent(
                 language=ev.alternatives[0].language,
-                transcript=ev.alternatives[0].text,
+                transcript=transcript,
                 is_final=True,
                 speaker_id=ev.alternatives[0].speaker_id,
             ),
@@ -1489,6 +1536,35 @@ class AgentActivity(RecognitionHooks):
                 preemptive.speech_handle._cancel()
 
             self._preemptive_generation = None
+
+    def _is_filler_only(self, transcript: str, confidence: float | None) -> bool:
+        """
+        Return True if the transcript appears to be only filler tokens and should be ignored
+        while the agent is speaking.
+
+        Logic:
+        - Tokenize by whitespace, lowercase, strip punctuation
+        - If every token is in the ignored fillers set, and confidence is below threshold,
+          treat as filler-only.
+        - If any token is not a filler, return False.
+        """
+        if not transcript:
+            return False
+
+        # if confidence is high, treat as valid speech
+        if confidence is not None and confidence >= getattr(self, "_filler_confidence_threshold", 0.5):
+            return False
+
+        # simple whitespace tokenize; keep this lightweight for realtime
+        tokens = [t.strip(".,!?;:\"'()[]") for t in transcript.split() if t.strip()]
+        if not tokens:
+            return False
+
+        for t in tokens:
+            if t.lower() not in self._ignored_fillers_set:
+                return False
+
+        return True
 
         if speech_handle is None:
             # Ensure the new message is passed to generate_reply

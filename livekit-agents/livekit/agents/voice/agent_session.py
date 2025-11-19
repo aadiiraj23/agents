@@ -88,6 +88,9 @@ class AgentSessionOptions:
     preemptive_generation: bool
     tts_text_transforms: Sequence[TextTransforms] | None
     ivr_detection: bool
+    # filler filter options
+    ignored_fillers: Sequence[str] | None = None
+    filler_confidence_threshold: float = 0.5
 
 
 Userdata_T = TypeVar("Userdata_T")
@@ -174,6 +177,9 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         tts_text_transforms: NotGivenOr[Sequence[TextTransforms] | None] = NOT_GIVEN,
         preemptive_generation: bool = False,
         ivr_detection: bool = False,
+    # filler-word interruption filter (see AgentActivity interruption handling)
+    ignored_fillers: Sequence[str] | None = None,
+    filler_confidence_threshold: float = 0.5,
         conn_options: NotGivenOr[SessionConnectOptions] = NOT_GIVEN,
         loop: asyncio.AbstractEventLoop | None = None,
         # deprecated
@@ -303,6 +309,8 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
             use_tts_aligned_transcript=use_tts_aligned_transcript
             if is_given(use_tts_aligned_transcript)
             else None,
+            ignored_fillers=ignored_fillers,
+            filler_confidence_threshold=filler_confidence_threshold,
         )
         self._conn_options = conn_options or SessionConnectOptions()
         self._started = False
